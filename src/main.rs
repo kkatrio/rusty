@@ -5,36 +5,47 @@ use std::io;
 
 //use std::{thread, time};
 
-//enum EventType {
-//    Accept, 65
-//    Read, 66
-//    Write, 67
-//}
+#[derive(Debug)]
+enum EventType {
+    Accept, //0
+    Read,  //1
+    Write, //2
+}
 
-//fn push_read_entry(sq: &mut SubmissionQueue, fd: types::Fd, buf: &mut Box<[u8]>) -> std::io::Result<()> {
-//    let read_e = opcode::Recv::new(fd, buf.as_mut_ptr(), buf.len().try_into().unwrap())
-//        .build()
-//        .user_data(70);
-//
-//    // push in the sumbission queue
-//    unsafe {
-//        sq.push(&read_e).expect("submission queue is full");
-//    }
-//    sq.sync();
-//    Ok(())
-//}
+fn push_read_entry(sq: &mut SubmissionQueue, fd: types::Fd, buf: &mut [u8; 2048]) -> std::io::Result<()> {
+    let read_e = opcode::Read::new(fd, buf.as_mut_ptr(), buf.len() as _)
+        .build()
+        .user_data(EventType::Write as _);
+
+    // push in the sumbission queue
+    unsafe {
+        sq.push(&read_e).expect("submission queue is full");
+    }
+    sq.sync();
+    Ok(())
+}
 
 fn push_accept_entry(sq: &mut SubmissionQueue, fd: types::Fd, sa: &mut libc::sockaddr, salen: &mut libc::socklen_t) -> std::io::Result<()> {
     let accept_e = opcode::Accept::new(fd, sa, salen)
         .build()
-        .user_data(65);
+        .user_data(EventType::Read as _);
 
     // push in the sumbission queue
     unsafe {
         sq.push(&accept_e).expect("submission queue is full");
     }
+    println!("PUSHED read");
     sq.sync();
     Ok(())
+}
+
+fn get_event_type(data: u64) -> Result<EventType, io::Error> {
+    match data {
+        0 => Ok(EventType::Accept),
+        1 => Ok(EventType::Read),
+        2 => Ok(EventType::Write),
+        _ => Err(io::Error::new(io::ErrorKind::Other, "Error in getting the event type")),
+    }
 }
 
 fn main() -> std::io::Result<()> {
@@ -61,9 +72,8 @@ fn main() -> std::io::Result<()> {
         println!("len before submit: sq={} cq= {}", sq.len(), cq.len());
         match submitter.submit_and_wait(1) {
             Ok(_) => (),
-            Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => break,
-            Err(err) => return Err(err.into()),
-        }
+            Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => break, 
+            Err(err) => return Err(err.into()), }
         cq.sync();
         sq.sync();
         println!("len after submit: sq={} cq= {}", sq.len(), cq.len());
@@ -74,39 +84,25 @@ fn main() -> std::io::Result<()> {
             println!("retval: {}", retval);
             println!("user data: {}", event);
 
-            match event {
-                65 => {
-                    println!("cqe accept 65");
-                    //Accept
-                    // push a Read operation
-                    //let mut buf = vec![0u8].into_boxed_slice();
-                    //push_read_entry(&mut sq, fd, &mut buf)?;
+            let event_type = get_event_type(event).unwrap();
+
+            match event_type {
+                EventType::Read => {
 
                     let fd = retval;
-                    let read_e = opcode::Read::new(types::Fd(fd), buf.as_mut_ptr(), buf.len() as _)
-                    .build()
-                    .user_data(70);
-
-                    // push in the sumbission queue
-                    unsafe {
-                        sq.push(&read_e).expect("submission queue is full");
-                    }
-                    sq.sync();
-                    println!("PUSHED read");
+                    push_read_entry(&mut sq, types::Fd(fd), &mut buf)?;
 
                 }
-                70 => {
-                    println!("cqe write 70");
+                EventType::Write => {
                     println!("buffer:  {}", String::from_utf8_lossy(&buf));
                 }
-                _ => return Err(io::Error::from_raw_os_error(22))
+                _ => {
+                    println!("Event type got: {:?}", event_type);
+                    return Err(io::Error::from_raw_os_error(22))
+                }
             }
-
-
         }
     }
-
-
 
     Ok(())
 }

@@ -1,37 +1,21 @@
 use std::mem::size_of;
 use std::{net::TcpListener, os::unix::prelude::AsRawFd};
 use io_uring::{opcode, types, IoUring, SubmissionQueue};
-use std::io;
-
-//use std::{thread, time};
+use std::collections::HashMap;
 
 #[derive(Debug)]
 enum EventType {
-    Accept, //0
-    Read,  //1
-    Write, //2
-    Poll, //3
+    Accept,
+    Read,
+    Write,
+    Poll,
 }
 
-struct UserData {
-    event: EventType,
-    ret_socket: types::Fd,
-}
-
-/*
-   hashmap<u64, UserData>
-   0, USerData
-   1, UserData
-   2, UserData
-
- */
-
-fn push_poll_entry(sq: &mut SubmissionQueue, fd: types::Fd) -> std::io::Result<()> {
-    let poll_e = opcode::PollAdd::new(fd, libc::POLLIN as _)
+fn push_poll_entry(sq: &mut SubmissionQueue, fd: i32) -> std::io::Result<()> {
+    let poll_e = opcode::PollAdd::new(types::Fd(fd), libc::POLLIN as _)
         .build()
-        .user_data(EventType::Poll as _);
+        .user_data(fd.try_into().unwrap());
 
-    // push in the sumbission queue
     unsafe {
         sq.push(&poll_e).expect("submission queue is full");
     }
@@ -40,12 +24,11 @@ fn push_poll_entry(sq: &mut SubmissionQueue, fd: types::Fd) -> std::io::Result<(
     Ok(())
 }
 
-fn push_write_entry(sq: &mut SubmissionQueue, fd: types::Fd, buf: &mut [u8; 2048]) -> std::io::Result<()> {
-    let write_e = opcode::Write::new(fd, buf.as_mut_ptr(), buf.len() as _)
+fn push_write_entry(sq: &mut SubmissionQueue, fd: i32, buf: &mut [u8; 2048]) -> std::io::Result<()> {
+    let write_e = opcode::Write::new(types::Fd(fd), buf.as_mut_ptr(), buf.len() as _)
         .build()
-        .user_data(EventType::Write as _);
+        .user_data(fd.try_into().unwrap());
 
-    // push in the sumbission queue
     unsafe {
         sq.push(&write_e).expect("submission queue is full");
     }
@@ -54,12 +37,11 @@ fn push_write_entry(sq: &mut SubmissionQueue, fd: types::Fd, buf: &mut [u8; 2048
     Ok(())
 }
 
-fn push_read_entry(sq: &mut SubmissionQueue, fd: types::Fd, buf: &mut [u8; 2048]) -> std::io::Result<()> {
-    let read_e = opcode::Read::new(fd, buf.as_mut_ptr(), buf.len() as _)
+fn push_read_entry(sq: &mut SubmissionQueue, fd: i32, buf: &mut [u8; 2048]) -> std::io::Result<()> {
+    let read_e = opcode::Read::new(types::Fd(fd), buf.as_mut_ptr(), buf.len() as _)
         .build()
-        .user_data(EventType::Read as _);
+        .user_data(fd.try_into().unwrap());
 
-    // push in the sumbission queue
     unsafe {
         sq.push(&read_e).expect("submission queue is full");
     }
@@ -68,12 +50,11 @@ fn push_read_entry(sq: &mut SubmissionQueue, fd: types::Fd, buf: &mut [u8; 2048]
     Ok(())
 }
 
-fn push_accept_entry(sq: &mut SubmissionQueue, fd: types::Fd, sa: &mut libc::sockaddr, salen: &mut libc::socklen_t) -> std::io::Result<()> {
-    let accept_e = opcode::Accept::new(fd, sa, salen)
+fn push_accept_entry(sq: &mut SubmissionQueue, fd: i32,  sa: &mut libc::sockaddr, salen: &mut libc::socklen_t) -> std::io::Result<()> {
+    let accept_e = opcode::Accept::new(types::Fd(fd), sa, salen)
         .build()
-        .user_data(EventType::Accept as _);
+        .user_data(fd.try_into().unwrap()); //u64
 
-    // push in the sumbission queue
     unsafe {
         sq.push(&accept_e).expect("submission queue is full");
     }
@@ -82,24 +63,13 @@ fn push_accept_entry(sq: &mut SubmissionQueue, fd: types::Fd, sa: &mut libc::soc
     Ok(())
 }
 
-// push user data as u64 (_), get back EventType to use in match
-fn get_event_type(data: u64) -> Result<EventType, io::Error> {
-    match data {
-        0 => Ok(EventType::Accept),
-        1 => Ok(EventType::Read),
-        2 => Ok(EventType::Write),
-        3 => Ok(EventType::Poll),
-        _ => Err(io::Error::new(io::ErrorKind::Other, "Error getting the event type")),
-    }
-}
-
 fn main() -> std::io::Result<()> {
 
     let mut buf = [0u8; 2048];
 
     let listener = TcpListener::bind("0.0.0.0:8090").unwrap();
     println!("listening on {}", listener.local_addr()?);
-    let fd = types::Fd(listener.as_raw_fd());
+    let fd = listener.as_raw_fd();
 
     let mut ring = IoUring::new(8)?;
     let (submitter, mut sq, mut cq) = ring.split();
@@ -110,11 +80,12 @@ fn main() -> std::io::Result<()> {
         sa_data: [0; 14] };
     let mut sockaddrlen = size_of::<libc::sockaddr_in>() as libc::socklen_t;
 
-    push_accept_entry(&mut sq, fd, &mut sockaddr, &mut sockaddrlen)?;
-    println!("push entry done");
+    // keep track of event per connection
+    let mut fd_event = HashMap::new();
 
-    // fd returned by accept
-    let mut new_socket = 0;
+    push_accept_entry(&mut sq, fd, &mut sockaddr, &mut sockaddrlen)?;
+    fd_event.insert(fd, EventType::Accept);
+
     let mut accept_on = false;
 
     loop {
@@ -133,49 +104,45 @@ fn main() -> std::io::Result<()> {
         }
 
         while let Some(cqe) = cq.next() {
-            let retval = cqe.result();
-            let event = cqe.user_data();
-            println!("retval: {}", retval);
-            println!("user data: {}", event);
 
-            let event_type = get_event_type(event).unwrap();
+            // accept returns a new socket here
+            let retval = cqe.result();
+
+            // contains the fd that was pushed as user data
+            let conn_fd = cqe.user_data() as i32;
+
+            println!("retval: {}", retval);
+            println!("conn_fd: {}", conn_fd);
+
+            // what event completed on this socket
+            let event_type = &fd_event[&conn_fd]; // i32
+            println!("event_type: {:?}", event_type);
 
             match event_type {
                 EventType::Accept => {
-                    println!("Accept cqe data");
-                    // raise flag to push accept
+                    // raise flag to push another accept
                     accept_on = true;
                     // use the new socket that accept returns
-                    new_socket = retval;
-                    println!("new socket after accept: {}", new_socket);
-                    // no need to poll, we can read immediately
-                    push_poll_entry(&mut sq, types::Fd(new_socket))?;
-                    //push_read_entry(&mut sq, types::Fd(new_socket), &mut buf)?;
+                    fd_event.insert(retval, EventType::Poll);
+                    push_poll_entry(&mut sq, retval)?;
                 }
                 EventType::Poll => {
-                    println!("Poll cqe data");
-                    push_read_entry(&mut sq, types::Fd(new_socket), &mut buf)?;
+                    push_read_entry(&mut sq, conn_fd, &mut buf)?;
+                    fd_event.insert(conn_fd, EventType::Read);
 
                 }
                 EventType::Read => {
-                    println!("Read cqe data");
-                    // get read buffer and handle request
-                    // push write entry
-                    println!("new socket after read: {}", new_socket);
-                    push_write_entry(&mut sq, types::Fd(new_socket), &mut buf)?;
+                    println!("conn_fd in Read: {}", conn_fd);
+                    push_write_entry(&mut sq, conn_fd, &mut buf)?;
+                    fd_event.insert(conn_fd, EventType::Write);
 
                 }
                 EventType::Write => {
                     println!("buffer:  {}", String::from_utf8_lossy(&buf));
                     // check if there is another message to read
-                    push_poll_entry(&mut sq, types::Fd(new_socket))?;
+                    push_poll_entry(&mut sq, conn_fd)?;
+                    fd_event.insert(conn_fd, EventType::Poll);
                 }
-                /*
-                _ => {
-                    println!("Event type got: {:?}", event_type);
-                    return Err(io::Error::from_raw_os_error(22))
-                }
-                */
             }
         }
     }

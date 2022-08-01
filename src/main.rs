@@ -63,16 +63,23 @@ fn push_accept_entry(sq: &mut SubmissionQueue, fd: i32,  sa: &mut libc::sockaddr
     Ok(())
 }
 
-fn handle_request(fd: i32, _buf: &Box<[u8]>, fd_resp_map: &mut HashMap<i32, String>) {
+fn handle_request(fd: i32, buf: &Box<[u8]>, fd_resp_map: &mut HashMap<i32, String>) {
 
-    let status_line = "HTTP/1.1 200 OK";
-    let contents = fs::read_to_string("resources/hello.html").unwrap();
+    let get = b"GET / HTTP/1.1\r\n";
+    let (status_line, filename) = if buf.starts_with(get) {
+        ("HTTP/1.1 200 OK", "resources/hello.html")
+    }
+    else {
+        ("HTTP/1.1 404 NOT FOUND", "resources/404.html")
+    };
+
+    let contents = fs::read_to_string(filename).unwrap();
     let response = format!(
         "{}\r\nContent-Length: {}\r\n\r\n{}",
         status_line,
         contents.len(),
         contents
-    );
+        );
 
     fd_resp_map.insert(fd, response);
 }
@@ -128,7 +135,7 @@ fn main() -> std::io::Result<()> {
             let event_type = &fd_event[&fd]; // i32
             match event_type {
                 EventType::Accept => {
-                    println!("Accept new connection | retval: {}, fd(server socket): {}", retval, fd);
+                    println!("Accept new connection | connection fd: {}, server fd: {}", retval, fd);
                     // accept another connection
                     accept_on = true;
                     // use the new socket that accept returns
@@ -136,14 +143,14 @@ fn main() -> std::io::Result<()> {
                     push_poll_entry(&mut sq, retval)?;
                 }
                 EventType::Poll => {
-                    println!("Poll | retval: {}, fd: {}", retval, fd);
+                    println!("Poll | event: {}, fd: {}", retval, fd);
                     let mut buf = vec![0u8; 2048].into_boxed_slice();
                     push_read_entry(&mut sq, fd, &mut buf)?;
                     fd_event.insert(fd, EventType::Read {buf});
 
                 }
                 EventType::Read {buf} => {
-                    println!("Read | retval: {}, fd: {}", retval, fd);
+                    println!("Read | size: {}, fd: {}", retval, fd);
                     if retval == 0 {
                         println!("shutdown");
                         unsafe {
@@ -157,7 +164,7 @@ fn main() -> std::io::Result<()> {
                     }
                 }
                 EventType::Write => {
-                    println!("Write | retval: {}, fd: {}", retval, fd);
+                    println!("Write | size: {}, fd: {}", retval, fd);
                     // check if there is another message to read
                     push_poll_entry(&mut sq, fd)?;
                     fd_event.insert(fd, EventType::Poll);

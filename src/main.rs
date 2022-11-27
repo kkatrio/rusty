@@ -1,20 +1,19 @@
-use std::mem::size_of;
-use std::{net::TcpListener, os::unix::prelude::AsRawFd};
 use io_uring::{opcode, types, IoUring, SubmissionQueue};
 use std::collections::HashMap;
 use std::fs;
+use std::mem::size_of;
+use std::{net::TcpListener, os::unix::prelude::AsRawFd};
 
 #[derive(Debug)]
 enum EventType {
     Accept,
-    Read {
-        buf: Box<[u8]>,
-    },
+    Read { buf: Box<[u8]> },
     Write,
     Poll,
 }
 
 fn push_poll_entry(sq: &mut SubmissionQueue, fd: i32) -> std::io::Result<()> {
+    println!("pushing poll, fd: {}", fd);
     let poll_e = opcode::PollAdd::new(types::Fd(fd), libc::POLLIN as _)
         .build()
         .user_data(fd.try_into().unwrap());
@@ -27,6 +26,8 @@ fn push_poll_entry(sq: &mut SubmissionQueue, fd: i32) -> std::io::Result<()> {
 }
 
 fn push_write_entry(sq: &mut SubmissionQueue, fd: i32, buf: &String) -> std::io::Result<()> {
+    println!("pushing write, fd: {}", fd);
+    // send to the connected socket fd
     let write_e = opcode::Send::new(types::Fd(fd), buf.as_ptr(), buf.len() as _)
         .build()
         .user_data(fd.try_into().unwrap());
@@ -39,6 +40,7 @@ fn push_write_entry(sq: &mut SubmissionQueue, fd: i32, buf: &String) -> std::io:
 }
 
 fn push_read_entry(sq: &mut SubmissionQueue, fd: i32, buf: &mut Box<[u8]>) -> std::io::Result<()> {
+    println!("pushing read, fd: {}", fd);
     let read_e = opcode::Recv::new(types::Fd(fd), buf.as_mut_ptr(), buf.len() as _)
         .build()
         .user_data(fd.try_into().unwrap());
@@ -50,7 +52,12 @@ fn push_read_entry(sq: &mut SubmissionQueue, fd: i32, buf: &mut Box<[u8]>) -> st
     Ok(())
 }
 
-fn push_accept_entry(sq: &mut SubmissionQueue, fd: i32,  sa: &mut libc::sockaddr, salen: &mut libc::socklen_t) -> std::io::Result<()> {
+fn push_accept_entry(
+    sq: &mut SubmissionQueue,
+    fd: i32,
+    sa: &mut libc::sockaddr,
+    salen: &mut libc::socklen_t,
+) -> std::io::Result<()> {
     println!("pushing accept, fd: {}", fd);
     let accept_e = opcode::Accept::new(types::Fd(fd), sa, salen)
         .build()
@@ -64,12 +71,10 @@ fn push_accept_entry(sq: &mut SubmissionQueue, fd: i32,  sa: &mut libc::sockaddr
 }
 
 fn handle_request(fd: i32, buf: &Box<[u8]>, fd_resp_map: &mut HashMap<i32, String>) {
-
     let get = b"GET / HTTP/1.1\r\n";
     let (status_line, filename) = if buf.starts_with(get) {
         ("HTTP/1.1 200 OK", "resources/hello.html")
-    }
-    else {
+    } else {
         ("HTTP/1.1 404 NOT FOUND", "resources/404.html")
     };
 
@@ -79,13 +84,12 @@ fn handle_request(fd: i32, buf: &Box<[u8]>, fd_resp_map: &mut HashMap<i32, Strin
         status_line,
         contents.len(),
         contents
-        );
+    );
 
     fd_resp_map.insert(fd, response);
 }
 
 fn main() -> std::io::Result<()> {
-
     let listener = TcpListener::bind("0.0.0.0:8090").unwrap();
     println!("listening on {}", listener.local_addr()?);
     let server_fd = listener.as_raw_fd();
@@ -97,75 +101,116 @@ fn main() -> std::io::Result<()> {
     // client socket address
     let mut sockaddr = libc::sockaddr {
         sa_family: libc::AF_INET as libc::sa_family_t,
-        sa_data: [0; 14] };
+        sa_data: [0; 14],
+    };
     let mut sockaddrlen = size_of::<libc::sockaddr_in>() as libc::socklen_t;
 
     // keep track of event per connection <fd, EventType>
-    let mut fd_event = HashMap::new();
+    let mut fd_event = HashMap::new(); // TODO: is this ever cleaned?
+
     // keep track of response per connection <fd, EventType>
     let mut fd_response = HashMap::new();
 
+    // pushes server_fd in the user_data of the accept operation
+    // and in the fd_event map
+    // so that we can retrieve the event using the fd when the an event is completed.
     push_accept_entry(&mut sq, server_fd, &mut sockaddr, &mut sockaddrlen)?;
     fd_event.insert(server_fd, EventType::Accept);
     let mut accept_on = false;
 
     loop {
-        match submitter.submit_and_wait(1) {
-            Ok(_) => (),
-            Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => break, 
-            Err(err) => return Err(err.into()), }
-        cq.sync();
-        sq.sync();
-
         if accept_on {
+            // accept blocks, i.e it moves to the cq only when a new connection is accepted.
             push_accept_entry(&mut sq, server_fd, &mut sockaddr, &mut sockaddrlen)?;
+            // we do not push into the fd_event map here, because we always accept on the same fd (server_fd).
+            // This is pushed once (before the loop) in the map, and it does not change.
+            // When a new connection is established, the new connection fd is indeed pushed in the
+            // map on the completion of the accept.
             accept_on = false;
         }
+        // operation executed here and blocks
+        println!("before sq: {} cq: {}", sq.len(), cq.len());
+        println!("-----submitting-----");
+        // waits until at least 1 event completes, and accept event blocks until a connection is present
+        // https://www.man7.org/linux/man-pages/man2/accept.2.html
+        match submitter.submit_and_wait(1) {
+            Ok(_) => (),
+            Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => break,
+            Err(err) => return Err(err.into()),
+        }
+        cq.sync();
+        sq.sync();
+        println!("after  sq: {} cq: {}", sq.len(), cq.len());
+
+        /*
+        => Accepted new connection | new connection fd: 5, server fd: 3
+        pushing poll, fd: 5
+        pushing accept, fd: 3
+        before sq: 2 cq: 0
+        -----submitting-----
+        after  sq: 0 cq: 1 // poll is completed, acccept is blocking
+        => Polled | event: 1, fd: 5
+        */
 
         while let Some(cqe) = cq.next() {
-
+            // this is the result of each operation
             // accept returns a new fd, recv and send return the size of the buffer
             let retval = cqe.result();
 
             // contains the fd that was pushed in user data.
             // Accept pushed the server_fd while the other operations
-            // push and use the second fd that accept has returned.
+            // push and use the new fd that accept has returned.
             let fd = cqe.user_data() as i32;
 
+            println!("fd_event map: {:?}", fd_event);
             let event_type = &fd_event[&fd]; // i32
             match event_type {
                 EventType::Accept => {
-                    println!("Accept new connection | connection fd: {}, server fd: {}", retval, fd);
+                    println!(
+                        "=> Accepted new connection | new connection fd: {}, server fd: {}",
+                        retval, fd
+                    );
                     // accept another connection
-                    accept_on = true;
-                    // use the new socket that accept returns
-                    fd_event.insert(retval, EventType::Poll);
+                    // when this accept event is submitted, it will be removed from the cq and it will block
+                    accept_on = true; // system crashes if false!
+
+                    // use the new socket that accept returns to poll for a message there
+                    fd_event.insert(retval, EventType::Poll); // TODO: refactor so that there is
+                                                              // one push interface, pushing both
                     push_poll_entry(&mut sq, retval)?;
                 }
                 EventType::Poll => {
-                    println!("Poll | event: {}, fd: {}", retval, fd);
+                    println!("=> Polled | event: {}, fd: {}", retval, fd);
                     let mut buf = vec![0u8; 2048].into_boxed_slice();
                     push_read_entry(&mut sq, fd, &mut buf)?;
-                    fd_event.insert(fd, EventType::Read {buf});
-
+                    // The Read EventType overwrites the Poll on the same fd
+                    fd_event.insert(fd, EventType::Read { buf });
                 }
-                EventType::Read {buf} => {
-                    println!("Read | size: {}, fd: {}", retval, fd);
+                EventType::Read { buf } => {
+                    println!("=> Reading | size: {}, fd: {}", retval, fd);
                     if retval == 0 {
-                        println!("shutdown");
+                        // shutdown connection on an empty body.
+                        // [FIN, ACK] message, Len: 0
+                        println!("=> shutdown connection");
+                        // clean fd from the fd_event map, we are no longer processing events for
+                        // this connection.
+                        fd_event.remove(&fd);
                         unsafe {
                             libc::close(fd);
                         }
-                    }
-                    else {
+                    } else {
                         handle_request(fd, buf, &mut fd_response);
                         push_write_entry(&mut sq, fd, &fd_response[&fd])?;
+                        // The Write EventType overwrites the Read on the same fd
                         fd_event.insert(fd, EventType::Write);
                     }
                 }
                 EventType::Write => {
-                    println!("Write | size: {}, fd: {}", retval, fd);
+                    println!("=> Write | size: {}, fd: {}", retval, fd);
                     // check if there is another message to read
+                    // poll blocks if the fd is not ready
+                    // https://www.man7.org/linux/man-pages/man2/poll.2.html
+                    // If we did not poll, the next message would create a new connection
                     push_poll_entry(&mut sq, fd)?;
                     fd_event.insert(fd, EventType::Poll);
                 }

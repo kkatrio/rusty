@@ -90,7 +90,8 @@ fn handle_request(fd: i32, buf: &Box<[u8]>, fd_resp_map: &mut HashMap<i32, Strin
     fd_resp_map.insert(fd, response);
 }
 
-pub fn run(listener: TcpListener) -> std::io::Result<()> {
+// Todo: Implement a Server struct and return this
+pub async fn run(listener: TcpListener) -> Result<(), std::io::Error> {
     // server file descriptor of the bound listening socket
     let server_fd = listener.as_raw_fd();
     log::debug!("Server socket: {}", server_fd);

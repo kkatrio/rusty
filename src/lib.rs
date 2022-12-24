@@ -9,8 +9,8 @@ use std::os::unix::io::AsRawFd;
 #[derive(Debug)]
 enum EventType {
     Accept,
-    Read { buf: Box<[u8]> },
-    Write,
+    Recv { buf: Box<[u8]> },
+    Send,
     Poll,
 }
 
@@ -27,7 +27,7 @@ fn push_poll_entry(sq: &mut SubmissionQueue, fd: i32) -> std::io::Result<()> {
     Ok(())
 }
 
-fn push_write_entry(sq: &mut SubmissionQueue, fd: i32, buf: &String) -> std::io::Result<()> {
+fn push_send_entry(sq: &mut SubmissionQueue, fd: i32, buf: &String) -> std::io::Result<()> {
     log::debug!("pushing write at fd: {}", fd);
     // send to the connected socket fd
     let write_e = opcode::Send::new(types::Fd(fd), buf.as_ptr(), buf.len() as _)
@@ -41,7 +41,7 @@ fn push_write_entry(sq: &mut SubmissionQueue, fd: i32, buf: &String) -> std::io:
     Ok(())
 }
 
-fn push_read_entry(sq: &mut SubmissionQueue, fd: i32, buf: &mut Box<[u8]>) -> std::io::Result<()> {
+fn push_recv_entry(sq: &mut SubmissionQueue, fd: i32, buf: &mut Box<[u8]>) -> std::io::Result<()> {
     log::debug!("pushing read at fd: {}", fd);
     let read_e = opcode::Recv::new(types::Fd(fd), buf.as_mut_ptr(), buf.len() as _)
         .build()
@@ -111,6 +111,8 @@ pub async fn run(listener: TcpListener) -> Result<(), std::io::Error> {
 
     // internal housekeeping
     // keep track of event per connection <fd, EventType>
+    // TODO: consider asnother level of indirection, i.e using a pointer to pass on the user_data
+    // instead of the fd
     let mut fd_event = HashMap::new();
     // keep track of response per connection <fd, EventType>
     let mut fd_response = HashMap::new();
@@ -187,12 +189,12 @@ pub async fn run(listener: TcpListener) -> Result<(), std::io::Error> {
                 EventType::Poll => {
                     log::debug!("=> Polled | event: {}, connected fd: {}", retval, fd);
                     let mut buf = vec![0u8; 2048].into_boxed_slice();
-                    push_read_entry(&mut sq, fd, &mut buf)?;
-                    // The Read EventType overwrites the Poll on the same fd
-                    fd_event.insert(fd, EventType::Read { buf });
+                    push_recv_entry(&mut sq, fd, &mut buf)?;
+                    // The Recv EventType overwrites the Poll on the same fd
+                    fd_event.insert(fd, EventType::Recv { buf });
                 }
-                EventType::Read { buf } => {
-                    log::debug!("=> Reading | size: {}, connected fd: {}", retval, fd);
+                EventType::Recv { buf } => {
+                    log::debug!("=> Recving | size: {}, connected fd: {}", retval, fd);
                     if retval == 0 {
                         // shutdown connection on an empty body.
                         // [FIN, ACK] message, Len: 0
@@ -205,13 +207,13 @@ pub async fn run(listener: TcpListener) -> Result<(), std::io::Error> {
                         }
                     } else {
                         handle_request(fd, buf, &mut fd_response);
-                        push_write_entry(&mut sq, fd, &fd_response[&fd])?;
-                        // The Write EventType overwrites the Read on the same fd
-                        fd_event.insert(fd, EventType::Write);
+                        push_send_entry(&mut sq, fd, &fd_response[&fd])?;
+                        // The Send EventType overwrites the Recv on the same fd
+                        fd_event.insert(fd, EventType::Send);
                     }
                 }
-                EventType::Write => {
-                    log::debug!("=> Write | size: {}, fd: {}", retval, fd);
+                EventType::Send => {
+                    log::debug!("=> Send | size: {}, fd: {}", retval, fd);
                     // check if there is another message to read
                     // poll blocks if the fd is not ready
                     // https://www.man7.org/linux/man-pages/man2/poll.2.html

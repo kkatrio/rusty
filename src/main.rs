@@ -1,10 +1,10 @@
-use env_logger::Builder;
+use env_logger::{Builder, Env};
 use std::io::Write;
 use std::net::TcpListener;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let mut builder = Builder::from_env("LOG_LEVEL");
+    let mut builder = Builder::from_env(Env::default().default_filter_or("debug"));
     builder.format(|buf, record| {
         writeln!(
             buf,
@@ -33,6 +33,6 @@ async fn main() -> std::io::Result<()> {
             .local_addr()
             .expect("Failed to listen to local addr")
     );
-    rusty::run(listener).await.expect("rusty run failed");
+    rusty::run(listener).expect("rusty run failed");
     Ok(())
 }

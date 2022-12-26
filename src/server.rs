@@ -32,7 +32,7 @@ impl ClientSocket {
 }
 
 pub struct Server {
-    server_fd: i32, // maybe u32?
+    listener: TcpListener,
     io_uring: IoUring,
 
     // keep track of event per connection <fd, EventType>
@@ -53,8 +53,6 @@ impl Server {
         // server fd
         let listener = TcpListener::bind(address)?;
         // file descriptor of the bound listening socket
-        let server_fd = listener.as_raw_fd();
-        log::debug!("Server listening socket: {}", server_fd);
 
         let io_uring = IoUring::new(8)?;
         let fd_event = HashMap::new();
@@ -62,7 +60,7 @@ impl Server {
 
         let client_socket = ClientSocket::new();
         Ok(Server {
-            server_fd,
+            listener,
             io_uring,
             fd_event,    // map
             fd_response, // map
@@ -72,6 +70,11 @@ impl Server {
 
     // This is blocking
     pub fn run(&mut self) -> Result<(), std::io::Error> {
+        // get the fd of the listening socket
+        // needed only to push an accept event
+        let server_fd = self.listener.as_raw_fd();
+        log::debug!("Server listening socket: {}", server_fd);
+
         let (submitter, mut sq, mut cq) = self.io_uring.split();
 
         // start by pushing server_fd in the user_data of the accept operation
@@ -80,11 +83,11 @@ impl Server {
         // We push only the fd in the user data, and keep the all the rest in a hashmap.
         push_accept_entry(
             &mut sq,
-            self.server_fd,
+            server_fd,
             &mut self.client_socket.socket,
             &mut self.client_socket.socket_len,
         )?;
-        self.fd_event.insert(self.server_fd, EventType::Accept);
+        self.fd_event.insert(server_fd, EventType::Accept);
         let mut accept_on = false;
 
         loop {
@@ -92,7 +95,7 @@ impl Server {
                 // accept blocks, i.e it moves to the cq only when a new connection is accepted.
                 push_accept_entry(
                     &mut sq,
-                    self.server_fd,
+                    server_fd,
                     &mut self.client_socket.socket,
                     &mut self.client_socket.socket_len,
                 )?;

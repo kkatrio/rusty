@@ -6,7 +6,7 @@ use rusty::server::Server;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let mut builder = Builder::from_env(Env::default().default_filter_or("trace"));
+    let mut builder = Builder::from_env(Env::default().default_filter_or("debug"));
     builder.format(|buf, record| {
         writeln!(
             buf,

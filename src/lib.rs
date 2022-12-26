@@ -75,7 +75,9 @@ fn push_accept_entry(
 }
 
 // we store the response per fd (client socket) in a hashmap
+/*
 fn handle_request(fd: i32, buf: &Box<[u8]>, fd_resp_map: &mut HashMap<i32, String>) {
+    log::info!("lib function used");
     let get = b"GET / HTTP/1.1\r\n";
     let (status_line, filename) = if buf.starts_with(get) {
         ("HTTP/1.1 200 OK", "resources/hello.html")
@@ -92,7 +94,7 @@ fn handle_request(fd: i32, buf: &Box<[u8]>, fd_resp_map: &mut HashMap<i32, Strin
     );
     fd_resp_map.insert(fd, response);
 }
-
+*/
 /*
 // Todo: Implement a Server struct and return this
 // This function is blocking

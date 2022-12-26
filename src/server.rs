@@ -1,11 +1,12 @@
 use io_uring::IoUring;
 use std::collections::HashMap;
+use std::fs;
 use std::mem::size_of;
 use std::net::TcpListener;
 use std::os::unix::io::AsRawFd; // why not std::os::fd::AsRawFd
 
 use crate::EventType;
-use crate::{handle_request, push_accept_entry, push_poll_entry, push_recv_entry, push_send_entry};
+use crate::{push_accept_entry, push_poll_entry, push_recv_entry, push_send_entry};
 
 // client socket
 // https://www.man7.org/linux/man-pages/man2/accept.2.html
@@ -66,6 +67,25 @@ impl Server {
             fd_response, // map
             client_socket,
         })
+    }
+
+    fn handle_request(fd: i32, buf: &Box<[u8]>, fd_resp_map: &mut HashMap<i32, String>) {
+        let get = b"GET / HTTP/1.1\r\n";
+        log::info!("SELF function used");
+        let (status_line, filename) = if buf.starts_with(get) {
+            ("HTTP/1.1 200 OK", "resources/hello.html")
+        } else {
+            ("HTTP/1.1 404 NOT FOUND", "resources/404.html")
+        };
+
+        let contents = fs::read_to_string(filename).unwrap();
+        let response = format!(
+            "{}\r\nContent-Length: {}\r\n\r\n{}",
+            status_line,
+            contents.len(),
+            contents
+        );
+        fd_resp_map.insert(fd, response);
     }
 
     // This is blocking
@@ -180,7 +200,7 @@ impl Server {
                                 libc::close(fd);
                             }
                         } else {
-                            handle_request(fd, buf, &mut self.fd_response);
+                            Server::handle_request(fd, buf, &mut self.fd_response);
                             push_send_entry(&mut sq, fd, &self.fd_response[&fd])?;
                             // The Send EventType overwrites the Recv on the same fd
                             self.fd_event.insert(fd, EventType::Send);

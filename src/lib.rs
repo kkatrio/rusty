@@ -1,10 +1,12 @@
-use io_uring::{opcode, types, IoUring, SubmissionQueue};
+use io_uring::{opcode, types, SubmissionQueue};
 use log;
 use std::collections::HashMap;
 use std::fs;
-use std::mem::size_of;
-use std::net::TcpListener;
-use std::os::unix::io::AsRawFd;
+//use std::mem::size_of;
+//use std::net::TcpListener;
+//use std::os::unix::io::AsRawFd;
+
+pub mod server;
 
 #[derive(Debug)]
 enum EventType {
@@ -28,7 +30,7 @@ fn push_poll_entry(sq: &mut SubmissionQueue, fd: i32) -> std::io::Result<()> {
 }
 
 fn push_send_entry(sq: &mut SubmissionQueue, fd: i32, buf: &String) -> std::io::Result<()> {
-    log::debug!("pushing write at fd: {}", fd);
+    log::debug!("pushing send at fd: {}", fd);
     // send to the connected socket fd
     let write_e = opcode::Send::new(types::Fd(fd), buf.as_ptr(), buf.len() as _)
         .build()
@@ -42,7 +44,7 @@ fn push_send_entry(sq: &mut SubmissionQueue, fd: i32, buf: &String) -> std::io::
 }
 
 fn push_recv_entry(sq: &mut SubmissionQueue, fd: i32, buf: &mut Box<[u8]>) -> std::io::Result<()> {
-    log::debug!("pushing read at fd: {}", fd);
+    log::debug!("pushing recv at fd: {}", fd);
     let read_e = opcode::Recv::new(types::Fd(fd), buf.as_mut_ptr(), buf.len() as _)
         .build()
         .user_data(fd.try_into().unwrap());
@@ -72,6 +74,7 @@ fn push_accept_entry(
     Ok(())
 }
 
+// we store the response per fd (client socket) in a hashmap
 fn handle_request(fd: i32, buf: &Box<[u8]>, fd_resp_map: &mut HashMap<i32, String>) {
     let get = b"GET / HTTP/1.1\r\n";
     let (status_line, filename) = if buf.starts_with(get) {
@@ -90,6 +93,7 @@ fn handle_request(fd: i32, buf: &Box<[u8]>, fd_resp_map: &mut HashMap<i32, Strin
     fd_resp_map.insert(fd, response);
 }
 
+/*
 // Todo: Implement a Server struct and return this
 // This function is blocking
 pub fn run(listener: TcpListener) -> Result<(), std::io::Error> {
@@ -227,3 +231,4 @@ pub fn run(listener: TcpListener) -> Result<(), std::io::Error> {
     }
     Ok(())
 }
+*/

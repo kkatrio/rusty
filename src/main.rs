@@ -1,10 +1,12 @@
 use env_logger::{Builder, Env};
 use std::io::Write;
-use std::net::TcpListener;
+//use std::net::TcpListener;
+
+use rusty::server::Server;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let mut builder = Builder::from_env(Env::default().default_filter_or("debug"));
+    let mut builder = Builder::from_env(Env::default().default_filter_or("trace"));
     builder.format(|buf, record| {
         writeln!(
             buf,
@@ -19,13 +21,6 @@ async fn main() -> std::io::Result<()> {
     builder.init();
 
     /*
-    //use env_logger::Env;
-    let env = Env::default()
-        .filter_or("LOG_LEVEL", "trace")
-        .write_style_or("LOG_STYLE", "always");
-    env_logger::init_from_env(env);
-    */
-
     let listener = TcpListener::bind("0.0.0.0:8090").unwrap();
     log::info!(
         "listening on {}",
@@ -34,5 +29,10 @@ async fn main() -> std::io::Result<()> {
             .expect("Failed to listen to local addr")
     );
     rusty::run(listener).expect("rusty run failed");
+    */
+
+    let mut server = Server::new("0.0.0.0:8090").expect("Failed to start server");
+    server.run().expect("server run failed");
+
     Ok(())
 }

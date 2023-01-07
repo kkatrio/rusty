@@ -1,8 +1,9 @@
 use env_logger::{Builder, Env};
 use reqwest;
+use rusty::server::Server;
 use std::io::{self, Write};
-use std::net::TcpListener;
 use std::process::Command;
+use std::thread;
 use tokio::task;
 
 async fn spawn_server() {
@@ -20,27 +21,19 @@ async fn spawn_server() {
     });
     builder.init();
 
-    let listener = TcpListener::bind("0.0.0.0:8090").unwrap();
-    log::info!(
-        "listening on {}",
-        listener
-            .local_addr()
-            .expect("Failed to listen to local addr")
-    );
-
-    rusty::run(listener).expect("Failed to spawn server");
-    //let server = rusty::run(listener);
-    //tokio::spawn(async { server.await }); // run server on a background thread
+    let mut server = Server::new("0.0.0.0:8090").expect("Failed to start server");
+    server.run().expect("server run failed");
 }
 
 /* run blocks on poll.
  * The connection is not accepted when attempted with reqwest async client.
- * It failes when using spawn_blocking, and blocks in poll when using tokio::spawn
+ * It fails when using spawn_blocking, and blocks in poll when using tokio::spawn
  */
 #[tokio::test]
 async fn reqwest_client() {
     let server = spawn_server();
-    task::spawn_blocking(|| server);
+    //task::spawn_blocking(|| server);
+    thread::spawn(|| server);
 
     log::info!("Server ready");
     let client = reqwest::Client::new();

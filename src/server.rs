@@ -72,6 +72,7 @@ impl Server {
     // fd is the connected socket, buf is the received message
     fn handle_request(fd: i32, buf: &Box<[u8]>, fd_resp_map: &mut HashMap<i32, String>) {
         let get = b"GET / HTTP/1.1\r\n";
+        log::debug!("buffer: \n{}", String::from_utf8_lossy(buf));
         let (status_line, filename) = if buf.starts_with(get) {
             ("HTTP/1.1 200 OK", "resources/hello.html")
         } else {
